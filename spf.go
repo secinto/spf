@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	MaxCount = 10
+	MaxCount = 20
 )
 
 var (
