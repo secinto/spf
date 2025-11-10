@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/asggo/spf"
+	"github.com/asggo/spf/spf"
 	"github.com/asggo/spf/auth"
 	"github.com/asggo/spf/dkim"
 )

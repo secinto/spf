@@ -42,14 +42,14 @@ import (
 	"net/mail"
 	"strings"
 
-	"github.com/asggo/spf"
 	"github.com/asggo/spf/dkim"
 	"github.com/asggo/spf/dmarc"
+	spflib "github.com/asggo/spf/spf"
 )
 
 // DNSResolver provides DNS lookup capabilities for authentication
 type DNSResolver interface {
-	spf.DNSResolver
+	spflib.DNSResolver
 }
 
 // EmailMessage represents an email message to be authenticated
@@ -93,7 +93,7 @@ type AuthenticationResult struct {
 
 // SPFResult contains SPF verification result
 type SPFResult struct {
-	Result spf.Result
+	Result spflib.Result
 	Domain string
 	Error  error
 }
@@ -156,20 +156,20 @@ func Authenticate(ctx context.Context, resolver DNSResolver, message *EmailMessa
 
 // performSPF executes SPF verification
 func performSPF(ctx context.Context, resolver DNSResolver, message *EmailMessage) SPFResult {
-	config := &spf.Config{
+	config := &spflib.Config{
 		DNSResolver: resolver,
 	}
 
 	domain := extractDomain(message.EnvelopeSender)
 	if domain == "" {
 		return SPFResult{
-			Result: spf.None,
+			Result: spflib.None,
 			Domain: "",
 			Error:  fmt.Errorf("no domain in envelope sender"),
 		}
 	}
 
-	result, err := spf.SPFTestContext(ctx, config, message.ClientIP, message.EnvelopeSender)
+	result, err := spflib.SPFTestContext(ctx, config, message.ClientIP, message.EnvelopeSender)
 
 	return SPFResult{
 		Result: result,
@@ -233,7 +233,7 @@ func performDMARC(ctx context.Context, resolver DNSResolver, headerFrom, envelop
 	}
 
 	// SPF pass determination
-	spfPass := spfResult.Result == spf.Pass
+	spfPass := spfResult.Result == spflib.Pass
 
 	// Evaluate DMARC
 	dmarcEval, err := dmarc.Evaluate(ctx, config, headerFrom, envelopeSender, spfPass, dkimDomains)
@@ -277,7 +277,7 @@ func evaluateAuthentication(spfResult SPFResult, dkimResults []DKIMResult, dmarc
 	}
 
 	// No DMARC policy - fallback to SPF/DKIM only
-	if spfResult.Result == spf.Pass {
+	if spfResult.Result == spflib.Pass {
 		return true, "SPF pass (no DMARC)"
 	}
 
@@ -289,7 +289,7 @@ func evaluateAuthentication(spfResult SPFResult, dkimResults []DKIMResult, dmarc
 
 	// Both failed
 	reasons := []string{}
-	if spfResult.Result != spf.Pass {
+	if spfResult.Result != spflib.Pass {
 		reasons = append(reasons, fmt.Sprintf("SPF %s", spfResult.Result))
 	}
 	if len(dkimResults) == 0 || !anyDKIMValid(dkimResults) {

@@ -14,7 +14,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/asggo/spf"
+	"github.com/asggo/spf/spf"
 	"github.com/asggo/spf/dkim"
 	"github.com/asggo/spf/dmarc"
 )

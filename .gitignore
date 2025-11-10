@@ -6,3 +6,4 @@ coverage.html
 *.exe
 *.test
 *.prof
+cmd/email-validator/email-validator
