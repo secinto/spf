@@ -1,19 +1,24 @@
 package spf
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"strings"
+	"sync"
 )
 
 func networkCIDR(ip, prefix string) (*net.IPNet, error) {
 	if prefix == "" {
-		ip := net.ParseIP(ip)
+		parsedIP := net.ParseIP(ip)
+		if parsedIP == nil {
+			return nil, ErrInvalidIP
+		}
 
-		if ip.To4() != nil {
-			prefix = "32"
+		if parsedIP.To4() != nil {
+			prefix = DefaultIPv4Prefix
 		} else {
-			prefix = "128"
+			prefix = DefaultIPv6Prefix
 		}
 	}
 
@@ -33,50 +38,95 @@ func ipInNetworks(ip net.IP, networks []*net.IPNet) bool {
 	return false
 }
 
-func buildNetworks(ips []string, prefix string) []*net.IPNet {
+func buildNetworks(ips []string, prefix string) ([]*net.IPNet, error) {
 	var networks []*net.IPNet
+	var lastErr error
 
 	for _, ip := range ips {
 		network, err := networkCIDR(ip, prefix)
 		if err == nil {
 			networks = append(networks, network)
+		} else {
+			lastErr = err
 		}
 	}
 
-	return networks
+	// Return networks even if some failed, but report last error
+	return networks, lastErr
 }
 
-func aNetworks(m *Mechanism) []*net.IPNet {
-	ips, _ := net.LookupHost(m.Domain)
-
-	return buildNetworks(ips, m.Prefix)
-}
-
-func mxNetworks(m *Mechanism) []*net.IPNet {
-	var networks []*net.IPNet
-
-	mxs, _ := net.LookupMX(m.Domain)
-
-	for _, mx := range mxs {
-		ips, _ := net.LookupHost(mx.Host)
-		networks = append(networks, buildNetworks(ips, m.Prefix)...)
+func aNetworks(ctx context.Context, resolver DNSResolver, m *Mechanism) ([]*net.IPNet, error) {
+	ips, err := resolver.LookupHost(ctx, m.Domain)
+	if err != nil {
+		return nil, err
 	}
 
-	return networks
+	networks, _ := buildNetworks(ips, m.Prefix)
+	return networks, nil
 }
 
-func testPTR(m *Mechanism, ip string) bool {
-	names, err := net.LookupAddr(ip)
+func mxNetworks(ctx context.Context, resolver DNSResolver, m *Mechanism) ([]*net.IPNet, error) {
+	var networks []*net.IPNet
 
+	mxs, err := resolver.LookupMX(ctx, m.Domain)
 	if err != nil {
-		return false
+		return nil, err
+	}
+
+	// Parallelize MX host lookups for better performance
+	type mxResult struct {
+		networks []*net.IPNet
+		err      error
+	}
+
+	results := make(chan mxResult, len(mxs))
+	var wg sync.WaitGroup
+
+	for _, mx := range mxs {
+		wg.Add(1)
+		go func(host string) {
+			defer wg.Done()
+			ips, err := resolver.LookupHost(ctx, host)
+			if err != nil {
+				results <- mxResult{nil, err}
+				return
+			}
+			nets, _ := buildNetworks(ips, m.Prefix)
+			results <- mxResult{nets, nil}
+		}(mx.Host)
+	}
+
+	// Close results channel when all goroutines complete
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	// Collect results
+	var lastErr error
+	for result := range results {
+		if result.err != nil {
+			lastErr = result.err
+		} else {
+			networks = append(networks, result.networks...)
+		}
+	}
+
+	// Return networks even if some MX lookups failed
+	return networks, lastErr
+}
+
+func testPTR(ctx context.Context, resolver DNSResolver, m *Mechanism, ip string) (bool, error) {
+	names, err := resolver.LookupAddr(ctx, ip)
+	if err != nil {
+		return false, err
 	}
 
 	for _, name := range names {
 		if strings.HasSuffix(name, m.Domain) {
-			return true
+			return true, nil
 		}
 	}
 
-	return false
+	return false, nil
 }

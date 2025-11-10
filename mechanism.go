@@ -2,6 +2,7 @@ package spf
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -21,7 +22,7 @@ const (
 )
 
 var (
-	ErrNoMatch = errors.New("Client was not covered by the mechanism.")
+	ErrNoMatch = errors.New("client was not covered by the mechanism")
 )
 
 // Mechanism represents a single mechanism in an SPF record.
@@ -128,31 +129,38 @@ func (m *Mechanism) Valid() bool {
 	return hasResult && hasName && isIP
 }
 
-// Evaluate determines if the given IP address is covered by the mechanism.
+// EvaluateWithContext determines if the given IP address is covered by the mechanism
+// using the provided context and resolver for DNS lookups.
 // If the IP is covered, the mechanism result is returned and error is nil.
 // If the IP is not covered an error is returned. The caller must check for
 // the error to determine if the result is valid.
-func (m *Mechanism) Evaluate(ip string, count int) (Result, error) {
-
+func (m *Mechanism) EvaluateWithContext(ctx context.Context, resolver DNSResolver, ip string, count int, visited map[string]bool) (Result, error) {
 	parsedIP := net.ParseIP(ip)
+	if parsedIP == nil {
+		return PermError, ErrInvalidIP
+	}
 
 	switch m.Name {
 	case "all":
 		return m.Result, nil
 	case "exists":
-		_, err := net.LookupHost(m.Domain)
+		_, err := resolver.LookupHost(ctx, m.Domain)
 		if err == nil {
 			return m.Result, nil
 		}
+		// DNS lookup failure for exists mechanism
+		return None, ErrNoMatch
 	case "redirect":
-		spf, err := NewSPF(m.Domain, "", count)
+		spf, err := NewSPFWithContext(ctx, resolver, m.Domain, "", count, visited)
 
 		// There is no clear definition of what to do with errors on a
-		// redirected domain. Trying to make wise choices here.
+		// redirected domain. Trying to make wise choices here per RFC 7208.
 		if err != nil {
-		switch err {
+			switch err {
 			case ErrFailedLookup:
 				return TempError, nil
+			case ErrIncludeLoop:
+				return PermError, nil
 			default:
 				return PermError, nil
 			}
@@ -160,16 +168,16 @@ func (m *Mechanism) Evaluate(ip string, count int) (Result, error) {
 
 		return spf.Test(ip), nil
 	case "include":
-		spf, err := NewSPF(m.Domain, "", count)
+		spf, err := NewSPFWithContext(ctx, resolver, m.Domain, "", count, visited)
 
 		// If there is no SPF record for the included domain or if we have too
 		// many mechanisms that require DNS lookups it is considered a
-		// PermError. Any other error is ok to ignore.
-		if err == ErrNoRecord || err == ErrMaxCount {
+		// PermError per RFC 7208 section 5.2.
+		if err == ErrNoRecord || err == ErrMaxCount || err == ErrIncludeLoop {
 			return PermError, nil
 		}
 
-		// The include statment is meant to be used as an if-pass or on-pass
+		// The include statement is meant to be used as an if-pass or on-pass
 		// statement. Meaning if we get a result other than Pass or PermError,
 		// it is ok to ignore it and move on to the other mechanisms.
 		result := spf.Test(ip)
@@ -177,20 +185,34 @@ func (m *Mechanism) Evaluate(ip string, count int) (Result, error) {
 			return result, nil
 		}
 	case "a":
-		networks := aNetworks(m)
+		networks, err := aNetworks(ctx, resolver, m)
+		if err != nil {
+			// DNS lookup failure is a temporary error
+			return TempError, nil
+		}
 		if ipInNetworks(parsedIP, networks) {
 			return m.Result, nil
 		}
 	case "mx":
-		networks := mxNetworks(m)
+		networks, err := mxNetworks(ctx, resolver, m)
+		if err != nil {
+			// DNS lookup failure is a temporary error
+			return TempError, nil
+		}
 		if ipInNetworks(parsedIP, networks) {
 			return m.Result, nil
 		}
 	case "ptr":
-		if testPTR(m, ip) {
+		match, err := testPTR(ctx, resolver, m, ip)
+		if err != nil {
+			// DNS lookup failure is a temporary error
+			return TempError, nil
+		}
+		if match {
 			return m.Result, nil
 		}
 	default:
+		// Default case handles ip4 and ip6 mechanisms
 		network, err := networkCIDR(m.Domain, m.Prefix)
 		if err == nil {
 			if network.Contains(parsedIP) {
@@ -200,6 +222,20 @@ func (m *Mechanism) Evaluate(ip string, count int) (Result, error) {
 	}
 
 	return None, ErrNoMatch
+}
+
+// Evaluate determines if the given IP address is covered by the mechanism.
+// This function is kept for backward compatibility and uses default configuration.
+// If the IP is covered, the mechanism result is returned and error is nil.
+// If the IP is not covered an error is returned. The caller must check for
+// the error to determine if the result is valid.
+//
+// Deprecated: Use EvaluateWithContext for better error handling and context support.
+func (m *Mechanism) Evaluate(ip string, count int) (Result, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), DefaultDNSTimeout)
+	defer cancel()
+
+	return m.EvaluateWithContext(ctx, defaultConfig.DNSResolver, ip, count, nil)
 }
 
 // NewMechanism creates a new Mechanism struct using the given string and
